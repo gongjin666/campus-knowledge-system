@@ -1,94 +1,189 @@
 import streamlit as st
 
-# 配置页面标题和图标
-st.set_page_config(page_title="校园知识推理系统", page_icon="🎓")
+st.set_page_config(page_title="校内人员图谱", page_icon="🏫")
 
-# ----- 1. 定义知识图谱数据 (用字典来模拟图结构) -----
-# 课程数据：包含课程信息，用 'prerequisites' (先修课程) 定义关系
-courses = {
-    "高等数学": {"credit": 5, "prerequisites": [], "teacher": "王教授"},
-    "线性代数": {"credit": 3, "prerequisites": [], "teacher": "李教授"},
-    "离散数学": {"credit": 4, "prerequisites": ["高等数学"], "teacher": "赵教授"},
-    "数据结构": {"credit": 4, "prerequisites": ["离散数学"], "teacher": "张教授"},
-    "机器学习": {"credit": 4, "prerequisites": ["线性代数", "高等数学"], "teacher": "孙教授"},
-    "深度学习": {"credit": 4, "prerequisites": ["机器学习", "线性代数"], "teacher": "孙教授"},
+st.title("🏫 校内人员图谱构建与信息查询")
+st.caption("基于知识图谱 + 规则推理 | 支持人员关系查询、指导关系、院系归属等")
+
+# ==================== 校内人员图谱数据 ====================
+# 这里用 Python 字典模拟图结构：每个人是一个节点，关系用列表存储
+
+persons = {
+    # 教师
+    "李教授": {
+        "type": "教师",
+        "dept": "计算机学院",
+        "title": "教授",
+        "office": "信息楼 301",
+        "students": ["张三", "李四", "王芳"],   # 指导的学生
+        "colleagues": ["张教授", "王教授"]
+    },
+    "张教授": {
+        "type": "教师",
+        "dept": "计算机学院",
+        "title": "教授",
+        "office": "信息楼 302",
+        "students": ["赵强", "孙丽"],
+        "colleagues": ["李教授", "王教授"]
+    },
+    "王教授": {
+        "type": "教师",
+        "dept": "数学学院",
+        "title": "教授",
+        "office": "数学楼 201",
+        "students": ["刘伟", "陈晨"],
+        "colleagues": ["李教授", "张教授"]
+    },
+    # 学生
+    "张三": {
+        "type": "学生",
+        "dept": "计算机学院",
+        "major": "计算机科学与技术",
+        "advisor": "李教授",
+        "year": 2022
+    },
+    "李四": {
+        "type": "学生",
+        "dept": "计算机学院",
+        "major": "软件工程",
+        "advisor": "李教授",
+        "year": 2023
+    },
+    "王芳": {
+        "type": "学生",
+        "dept": "计算机学院",
+        "major": "人工智能",
+        "advisor": "李教授",
+        "year": 2021
+    },
+    "赵强": {
+        "type": "学生",
+        "dept": "计算机学院",
+        "major": "计算机科学与技术",
+        "advisor": "张教授",
+        "year": 2022
+    },
+    "刘伟": {
+        "type": "学生",
+        "dept": "数学学院",
+        "major": "应用数学",
+        "advisor": "王教授",
+        "year": 2023
+    }
 }
 
-# 设施数据
-facilities = {
-    "图书馆": {"hours": "8:00-22:00", "location": "图书馆楼", "type": "学习场所"},
-    "第一食堂": {"hours": "6:30-20:00", "location": "生活区", "type": "餐厅"},
+# 院系信息（辅助）
+depts = {
+    "计算机学院": {"location": "信息楼", "dean": "李教授"},
+    "数学学院": {"location": "数学楼", "dean": "王教授"}
 }
 
-# ----- 2. 核心推理函数 (根据问题在图谱中进行推理) -----
+# ==================== 推理引擎 ====================
 def reason(question):
-    """接收用户问题，返回推理结果"""
+    """根据用户问题，在图谱中查找并推理"""
     q = question.lower()
     
-    # 推理1: 查询先修课程
-    if "先修" in q or "前置" in q:
-        for course in courses:
-            if course in question:
-                prereqs = courses[course]["prerequisites"]
-                if prereqs:
-                    return f"📚 **《{course}》** 需要先学习：**{' → '.join(prereqs)}**。"
-                return f"✅ **《{course}》** 没有先修课程要求，可以直接选修。"
+    # 1. 查询某人的学生 / 指导的学生
+    if "学生" in q or "指导" in q:
+        for name, info in persons.items():
+            if name in question and info["type"] == "教师":
+                students = info.get("students", [])
+                if students:
+                    return f"👨‍🏫 {name} 指导的学生有：{', '.join(students)}。"
+                else:
+                    return f"👨‍🏫 {name} 目前没有指导学生。"
     
-    # 推理2: 查询后续课程 (通过学习路径的反向查找)
-    if "学完" in q and ("能学" in q or "可以选" in q):
-        for prereq_course in courses:
-            if prereq_course in question:
-                next_courses = []
-                for course, info in courses.items():
-                    if prereq_course in info["prerequisites"]:
-                        next_courses.append(course)
-                if next_courses:
-                    return f"🔗 学完 **《{prereq_course}》** 后，可以继续学习：**{' → '.join(next_courses)}**。"
-                return f"⚠️ 目前没有以 **《{prereq_course}》** 为先修课程的进阶课程。"
+    # 2. 查询某学生的导师
+    if "导师" in q or "指导老师" in q:
+        for name, info in persons.items():
+            if name in question and info["type"] == "学生":
+                advisor = info.get("advisor")
+                if advisor:
+                    return f"🎓 {name} 的导师是：{advisor}。"
+                else:
+                    return f"🎓 未找到 {name} 的导师信息。"
     
-    # 推理3: 查询授课教师
-    if "谁教" in q or "老师" in q:
-        for course, info in courses.items():
-            if course in question:
-                return f"👨‍🏫 **《{course}》** 由 **{info['teacher']}** 讲授。"
+    # 3. 查询同事关系
+    if "同事" in q:
+        for name, info in persons.items():
+            if name in question and info["type"] == "教师":
+                colleagues = info.get("colleagues", [])
+                if colleagues:
+                    return f"🤝 {name} 的同事有：{', '.join(colleagues)}。"
+                else:
+                    return f"🤝 {name} 暂无同事信息。"
     
-    # 推理4: 查询设施信息
-    for name, info in facilities.items():
-        if name in question:
-            return f"🏢 **{name}**：{info['hours']}开放，位于 {info['location']}（{info['type']}）。"
+    # 4. 查询某人的院系
+    if "院系" in q or "哪个学院" in q:
+        for name, info in persons.items():
+            if name in question:
+                dept = info.get("dept")
+                if dept:
+                    return f"🏛️ {name} 属于 {dept}。"
+                else:
+                    return f"🏛️ 未找到 {name} 的院系信息。"
+    
+    # 5. 查询教师的办公室
+    if "办公室" in q or "在哪" in q:
+        for name, info in persons.items():
+            if name in question and info["type"] == "教师":
+                office = info.get("office")
+                if office:
+                    return f"📌 {name} 的办公室在：{office}。"
+    
+    # 6. 查询院系信息
+    for dept, info in depts.items():
+        if dept in question:
+            return f"🏢 {dept} 位于 {info['location']}，院长是 {info['dean']}。"
+    
+    # 7. 全校人员列表（展示图谱概览）
+    if "所有教师" in q or "教师列表" in q:
+        teachers = [name for name, info in persons.items() if info["type"] == "教师"]
+        return f"👨‍🏫 校内教师：{', '.join(teachers)}。"
+    
+    if "所有学生" in q or "学生列表" in q:
+        students = [name for name, info in persons.items() if info["type"] == "学生"]
+        return f"🎓 在校学生：{', '.join(students)}。"
     
     # 默认回复
-    return "💡 试试问：\n• 高等数学的先修课程是什么？\n• 学完数据结构能学什么？\n• 谁教机器学习？\n• 图书馆几点开门？"
+    return "💡 试试问：\n• 李教授的学生有哪些？\n• 张三的导师是谁？\n• 张教授的同事有哪些？\n• 计算机学院在哪？\n• 所有教师列表"
 
-# ----- 3. 主页面UI设计 (Streamlit可视化部分)-----
-st.title("🎓 校园知识图谱自动推理系统")
-st.caption("基于知识图谱 + 规则推理 | 支持先修查询、路径规划、设施问答")
+# ==================== 页面UI ====================
+user_question = st.text_input("💬 输入你的问题：", placeholder="例如：李教授的学生有哪些？")
 
-# 输入框
-user_question = st.text_input(
-    "💬 输入你的问题：",
-    placeholder="例如：高等数学的先修课程是什么？",
-    key="question_input"
-)
-
-# 推理按钮
 if st.button("🔍 开始推理", type="primary", use_container_width=True):
     if user_question:
-        with st.spinner("推理中..."):
+        with st.spinner("正在推理中..."):
             answer = reason(user_question)
         st.success("✅ 推理结果")
         st.info(answer)
         
-        # 展示推理过程（给老师看，显得更专业）
+        # 展示推理过程（专业感）
         with st.expander("📐 查看推理过程"):
             st.markdown("""
-            **推理引擎执行步骤：**
-            1.  **关键词提取**：从用户问题中提取实体（课程名/设施名）。
-            2.  **图谱匹配**：在我们的知识图谱中定位对应的“节点”。
-            3.  **关系查询**：根据查询类型进行“图遍历”。
-                -   **前置查询**：查找指向该节点的“入边”。
-                -   **后置查询**：查找从该节点出发的“出边”。
-            4.  **结果生成**：将多跳路径组合成自然语言答案。
+            **推理步骤：**
+            1. **实体识别**：从问题中提取人名、关系词（如“学生”、“导师”）。
+            2. **图谱匹配**：在人员字典中查找对应节点的属性。
+            3. **关系遍历**：根据关系类型（指导、同院系、同事）进行跳转。
+            4. **结果生成**：组合自然语言答案。
             """)
     else:
         st.warning("⚠️ 请输入一个问题")
+
+# 侧边栏显示图谱概览
+with st.sidebar:
+    st.header("📊 人员图谱概览")
+    st.subheader("教师")
+    for name, info in persons.items():
+        if info["type"] == "教师":
+            st.write(f"• **{name}** ({info['dept']})")
+    st.subheader("学生")
+    for name, info in persons.items():
+        if info["type"] == "学生":
+            st.write(f"• {name}（导师：{info['advisor']}）")
+    
+    st.divider()
+    st.caption("支持查询：学生列表、导师、同事、院系、办公室等")
+
+st.divider()
+st.caption("🏫 校内人员图谱 | 基于规则推理 | 可扩展更多关系")
