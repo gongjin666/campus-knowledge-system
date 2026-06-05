@@ -1,14 +1,12 @@
 import streamlit as st
 import networkx as nx
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch
-import re
 from difflib import get_close_matches
+import re
 
 # ---------- 页面配置 ----------
 st.set_page_config(page_title="校内人员图谱", page_icon="🏫", layout="wide")
 
-# 自定义CSS（更美观的卡片效果）
 st.markdown("""
 <style>
     .stButton button {
@@ -20,52 +18,13 @@ st.markdown("""
         background-color: #4CAF50;
         color: white;
     }
-    .big-font {
-        font-size: 20px !important;
-        font-weight: bold;
-    }
-    .info-card {
-        background-color: #f0f2f6;
-        border-radius: 15px;
-        padding: 20px;
-        margin: 10px 0;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🏫 校内人员图谱构建与信息查询")
-st.markdown("> **升级版**：基于知识图谱 + 规则推理 | 支持可视化、模糊匹配、多跳推理")
+st.markdown("> **动态子图版**：根据您的问题自动生成对应的知识图谱子图 | 支持模糊匹配、多跳推理")
 
-# ---------- 数据（知识图谱）----------
-# 使用字典模拟图，同时为了可视化，我们再维护一个 NetworkX 图
-@st.cache_resource
-def get_graph():
-    G = nx.Graph()
-    # 添加节点和边（关系）
-    # 人员节点
-    persons = [
-        "李教授", "张教授", "王教授",
-        "张三", "李四", "王芳", "赵强", "孙丽", "刘伟", "陈晨"
-    ]
-    G.add_nodes_from(persons, type="person")
-    
-    # 关系边
-    # 指导关系 (导师->学生)
-    edges = [
-        ("李教授", "张三"), ("李教授", "李四"), ("李教授", "王芳"),
-        ("张教授", "赵强"), ("张教授", "孙丽"),
-        ("王教授", "刘伟"), ("王教授", "陈晨")
-    ]
-    G.add_edges_from(edges, relation="指导")
-    # 同事关系
-    colleagues = [("李教授", "张教授"), ("李教授", "王教授"), ("张教授", "王教授")]
-    G.add_edges_from(colleagues, relation="同事")
-    
-    return G
-
-G = get_graph()
-
-# 详细的人员信息字典（用于属性查询）
+# ---------- 全局数据 ----------
 PERSONS = {
     "李教授": {"type": "教师", "dept": "计算机学院", "title": "教授", "office": "信息楼301", "students": ["张三","李四","王芳"], "colleagues": ["张教授","王教授"]},
     "张教授": {"type": "教师", "dept": "计算机学院", "title": "教授", "office": "信息楼302", "students": ["赵强","孙丽"], "colleagues": ["李教授","王教授"]},
@@ -84,116 +43,150 @@ DEPT_INFO = {
     "数学学院": {"location": "数学楼", "dean": "王教授"}
 }
 
-# ---------- 辅助函数 ----------
-def fuzzy_match(name, candidates):
-    """模糊匹配人名，支持拼音首字母？这里简单用 difflib"""
-    matches = get_close_matches(name, candidates, n=1, cutoff=0.6)
-    return matches[0] if matches else None
+@st.cache_resource
+def build_full_graph():
+    """构建完整的NetworkX图（指导关系 + 同事关系）"""
+    G = nx.Graph()
+    # 添加所有人员节点
+    for name in PERSONS:
+        G.add_node(name, type=PERSONS[name]["type"])
+    # 指导关系（有向，但绘图时用无向边+箭头样式，这里仍存为无向边并标记relation）
+    for teacher, info in PERSONS.items():
+        if info["type"] == "教师":
+            for student in info.get("students", []):
+                G.add_edge(teacher, student, relation="指导")
+    # 同事关系
+    for teacher, info in PERSONS.items():
+        if info["type"] == "教师":
+            for col in info.get("colleagues", []):
+                G.add_edge(teacher, col, relation="同事")
+    return G
 
-def get_all_names():
-    return list(PERSONS.keys())
+G_full = build_full_graph()
 
-def get_teachers():
-    return [n for n, info in PERSONS.items() if info["type"] == "教师"]
+def extract_entities_from_question(question):
+    """从问题中提取人名（精确匹配 + 模糊匹配）"""
+    candidates = list(PERSONS.keys())
+    # 精确匹配
+    found = [name for name in candidates if name in question]
+    # 模糊匹配（如果精确匹配为0，则尝试模糊）
+    if not found:
+        words = re.findall(r'[\u4e00-\u9fa5]{2,}', question)
+        for w in words:
+            match = get_close_matches(w, candidates, n=1, cutoff=0.6)
+            if match:
+                found.append(match[0])
+    return list(set(found))
 
-def get_students():
-    return [n for n, info in PERSONS.items() if info["type"] == "学生"]
+def get_subgraph(entities, G, hops=1):
+    """根据实体列表提取子图：包含这些实体及其hops跳邻居"""
+    if not entities:
+        return G  # 返回全图
+    nodes_to_keep = set(entities)
+    for ent in entities:
+        neighbors = list(nx.single_source_shortest_path_length(G, ent, cutoff=hops).keys())
+        nodes_to_keep.update(neighbors)
+    return G.subgraph(nodes_to_keep).copy()
 
-# ---------- 核心推理引擎（支持多跳）----------
+def draw_subgraph(question, G_full):
+    """根据问题绘制子图，高亮问题中涉及的实体"""
+    entities = extract_entities_from_question(question)
+    subG = get_subgraph(entities, G_full, hops=1)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    pos = nx.spring_layout(subG, seed=42, k=1.5)
+    
+    # 节点颜色：教师红色，学生蓝色，高亮实体黄色
+    node_colors = []
+    for node in subG.nodes():
+        if node in entities:
+            node_colors.append("#FFD700")  # 金黄色高亮
+        elif PERSONS[node]["type"] == "教师":
+            node_colors.append("#FF6B6B")
+        else:
+            node_colors.append("#4D9DE0")
+    nx.draw_networkx_nodes(subG, pos, ax=ax, node_color=node_colors, node_size=1200, alpha=0.9)
+    nx.draw_networkx_labels(subG, pos, ax=ax, font_size=10, font_weight="bold")
+    
+    # 边：指导关系用绿色实线箭头，同事关系橙色虚线
+    edges_advise = [(u,v) for u,v,d in subG.edges(data=True) if d.get('relation')=='指导']
+    edges_colleague = [(u,v) for u,v,d in subG.edges(data=True) if d.get('relation')=='同事']
+    if edges_advise:
+        nx.draw_networkx_edges(subG, pos, edgelist=edges_advise, ax=ax, edge_color="green", width=2, arrows=True, arrowstyle='->', arrowsize=15)
+    if edges_colleague:
+        nx.draw_networkx_edges(subG, pos, edgelist=edges_colleague, ax=ax, edge_color="orange", width=2, style='dashed')
+    ax.set_title(f"动态知识图谱（涉及：{', '.join(entities) if entities else '全部节点'}）", fontsize=12)
+    ax.axis('off')
+    return fig
+
+# ---------- 推理引擎（与原版类似，加入多跳）----------
 def reason(question):
     q = question.lower()
     original = question
-    # 提取所有可能出现的人名（先精确匹配，再模糊）
-    all_names = get_all_names()
-    mentioned_names = []
-    for name in all_names:
-        if name in original:
-            mentioned_names.append(name)
-    # 如果没匹配到，尝试模糊匹配
-    if not mentioned_names:
-        words = re.findall(r'[\u4e00-\u9fa5]{2,}', original)  # 提取中文词
-        for w in words:
-            matched = fuzzy_match(w, all_names)
-            if matched:
-                mentioned_names.append(matched)
-    mentioned_names = list(set(mentioned_names))  # 去重
+    entities = extract_entities_from_question(original)
     
-    # 1. 单跳查询：教师的学生
-    if "学生" in q and any(name in original for name in get_teachers()):
-        for teacher in get_teachers():
-            if teacher in original or (mentioned_names and teacher == mentioned_names[0]):
+    # 1. 教师的学生
+    if "学生" in q and any(name in original for name, info in PERSONS.items() if info["type"]=="教师"):
+        for teacher in [n for n,info in PERSONS.items() if info["type"]=="教师"]:
+            if teacher in original or (entities and teacher == entities[0]):
                 students = PERSONS[teacher].get("students", [])
                 if students:
                     return f"👨‍🏫 **{teacher}** 指导的学生：{', '.join(students)}。"
                 return f"👨‍🏫 **{teacher}** 暂无学生。"
     
     # 2. 学生的导师
-    if ("导师" in q or "指导老师" in q) and any(name in original for name in get_students()):
-        for student in get_students():
-            if student in original or (mentioned_names and student == mentioned_names[0]):
+    if ("导师" in q or "指导老师" in q) and any(name in original for name, info in PERSONS.items() if info["type"]=="学生"):
+        for student in [n for n,info in PERSONS.items() if info["type"]=="学生"]:
+            if student in original or (entities and student == entities[0]):
                 advisor = PERSONS[student].get("advisor")
                 if advisor:
                     return f"🎓 **{student}** 的导师是 **{advisor}**。"
                 return f"🎓 未找到 {student} 的导师。"
     
-    # 3. 同事关系查询（是否是同事）
-    if "是同事吗" in q or "和" in q and "同事" in q:
-        # 提取两个名字
-        if len(mentioned_names) >= 2:
-            a, b = mentioned_names[0], mentioned_names[1]
-            if (b in PERSONS[a].get("colleagues", [])) or (a in PERSONS[b].get("colleagues", [])):
-                return f"🤝 **{a}** 和 **{b}** 是同事。"
-            else:
-                return f"❌ **{a}** 和 **{b}** 不是同事。"
+    # 3. 同事关系查询
+    if "是同事吗" in q and len(entities) >= 2:
+        a,b = entities[0], entities[1]
+        if (b in PERSONS[a].get("colleagues", [])) or (a in PERSONS[b].get("colleagues", [])):
+            return f"🤝 **{a}** 和 **{b}** 是同事。"
+        else:
+            return f"❌ **{a}** 和 **{b}** 不是同事。"
     
-    # 4. 查询院系
+    # 4. 院系归属
     if "院系" in q or "哪个学院" in q:
-        for name in mentioned_names:
+        for name in entities:
             dept = PERSONS[name].get("dept")
             if dept:
                 return f"🏛️ **{name}** 属于 **{dept}**。"
     
-    # 5. 办公室位置
+    # 5. 办公室
     if "办公室" in q or "在哪" in q:
-        for name in mentioned_names:
+        for name in entities:
             if PERSONS[name]["type"] == "教师":
                 office = PERSONS[name].get("office")
                 if office:
                     return f"📌 **{name}** 的办公室在 **{office}**。"
     
-    # 6. 院系信息查询
+    # 6. 院系信息
     for dept, info in DEPT_INFO.items():
         if dept in original:
             return f"🏢 **{dept}** 位于 **{info['location']}**，院长是 **{info['dean']}**。"
     
-    # 7. 全校列表
+    # 7. 列表查询
     if "所有教师" in q:
-        return f"👨‍🏫 教师名单（{len(get_teachers())}人）：{', '.join(get_teachers())}"
+        teachers = [n for n,info in PERSONS.items() if info["type"]=="教师"]
+        return f"👨‍🏫 教师名单（{len(teachers)}人）：{', '.join(teachers)}"
     if "所有学生" in q:
-        return f"🎓 学生名单（{len(get_students())}人）：{', '.join(get_students())}"
+        students = [n for n,info in PERSONS.items() if info["type"]=="学生"]
+        return f"🎓 学生名单（{len(students)}人）：{', '.join(students)}"
     
-    # 8. 多跳推理示例：学生的导师的学生（二层）
-    if "导师的学生" in q and any(name in original for name in get_students()):
-        for student in get_students():
-            if student in original:
+    # 8. 多跳：学生的导师的学生
+    if "导师的学生" in q and entities:
+        for student in [n for n,info in PERSONS.items() if info["type"]=="学生"]:
+            if student in original or (entities and student == entities[0]):
                 advisor = PERSONS[student].get("advisor")
                 if advisor:
                     students_of_advisor = PERSONS[advisor].get("students", [])
                     return f"🔗 {student} 的导师是 {advisor}，{advisor} 还指导了：{', '.join(students_of_advisor)}"
                 break
-    
-    # 9. 关系路径（例如：李教授-张三-? 可扩展）
-    if "路径" in q and len(mentioned_names) >= 2:
-        try:
-            path = nx.shortest_path(G, source=mentioned_names[0], target=mentioned_names[1])
-            edge_labels = []
-            for i in range(len(path)-1):
-                edge_data = G.get_edge_data(path[i], path[i+1])
-                relation = edge_data.get('relation', '未知')
-                edge_labels.append(f"{path[i]} -{relation}-> {path[i+1]}")
-            return " → ".join(edge_labels)
-        except nx.NetworkXNoPath:
-            return f"❌ 未找到 {mentioned_names[0]} 到 {mentioned_names[1]} 的路径。"
     
     # 默认帮助
     return help_message()
@@ -209,66 +202,22 @@ def help_message():
     - 院系信息：`计算机学院在哪？`
     - 列表查询：`所有教师`、`所有学生`
     - 多跳推理：`张三的导师的学生有哪些？`
-    - 路径查询：`李教授 到 刘伟 的关系路径`
     """
 
-# ---------- 可视化图谱（使用 matplotlib） ----------
-def draw_graph():
-    fig, ax = plt.subplots(figsize=(10, 8))
-    pos = nx.spring_layout(G, seed=42, k=1.5)
-    # 节点颜色：教师红色，学生蓝色
-    node_colors = []
-    for node in G.nodes():
-        if PERSONS[node]["type"] == "教师":
-            node_colors.append("#FF6B6B")
-        else:
-            node_colors.append("#4D9DE0")
-    nx.draw_networkx_nodes(G, pos, ax=ax, node_color=node_colors, node_size=1200, alpha=0.9)
-    nx.draw_networkx_labels(G, pos, ax=ax, font_size=10, font_weight="bold")
-    # 边：指导关系实线，同事关系虚线
-    edges_advise = [(u,v) for u,v,d in G.edges(data=True) if d.get('relation')=='指导']
-    edges_colleague = [(u,v) for u,v,d in G.edges(data=True) if d.get('relation')=='同事']
-    nx.draw_networkx_edges(G, pos, edgelist=edges_advise, ax=ax, edge_color="green", width=2, arrows=True, arrowstyle='->', arrowsize=15)
-    nx.draw_networkx_edges(G, pos, edgelist=edges_colleague, ax=ax, edge_color="orange", width=2, style='dashed')
-    ax.set_title("校内人员知识图谱", fontsize=16)
-    ax.axis('off')
-    return fig
-
-# ---------- 侧边栏：数据管理（动态添加临时人员）----------
+# ---------- 侧边栏 ----------
 with st.sidebar:
-    st.header("📊 图谱概览")
-    st.metric("👨‍🏫 教师", len(get_teachers()))
-    st.metric("🎓 学生", len(get_students()))
+    st.header("📊 快速统计")
+    st.metric("教师", len([n for n,info in PERSONS.items() if info["type"]=="教师"]))
+    st.metric("学生", len([n for n,info in PERSONS.items() if info["type"]=="学生"]))
     st.divider()
-    
-    # 动态添加人员（仅会话内有效，演示扩展性）
-    st.subheader("➕ 临时添加人员")
-    new_name = st.text_input("姓名")
-    new_type = st.selectbox("类型", ["教师", "学生"])
-    if st.button("添加", use_container_width=True):
-        if new_name and new_name not in PERSONS:
-            if new_type == "教师":
-                PERSONS[new_name] = {"type": "教师", "dept": "未知", "title": "讲师", "office": "待定", "students": [], "colleagues": []}
-                G.add_node(new_name, type="person")
-            else:
-                PERSONS[new_name] = {"type": "学生", "dept": "未知", "major": "未知", "advisor": "待定", "year": 2024}
-                G.add_node(new_name, type="person")
-            st.success(f"已添加 {new_name}（{new_type}）")
-            st.cache_resource.clear()
-            st.rerun()
-        elif new_name in PERSONS:
-            st.warning("人员已存在")
-    
-    st.divider()
-    st.caption("💡 提示：添加的人员仅在当前会话有效，刷新页面即恢复。")
+    st.caption("💡 右侧图谱会根据您的问题动态变化，高亮涉及的人物。")
 
 # ---------- 主界面布局 ----------
-# 两列：左侧问答，右侧图谱
 col_left, col_right = st.columns([1.5, 1])
 
 with col_left:
     st.subheader("✨ 智能问答")
-    # 快速示例按钮（使用 grid 布局）
+    # 示例问题按钮
     ex_qs = [
         "李教授的学生有哪些？", "张三的导师是谁？", "李教授和张教授是同事吗？",
         "所有教师", "张三属于哪个学院？", "张三的导师的学生有哪些？"
@@ -289,29 +238,32 @@ with col_left:
                 answer = reason(question)
             st.success("✅ 推理结果")
             st.info(answer)
-            with st.expander("📐 查看推理路径"):
-                st.markdown("""
-                **推理步骤：**
-                1. **实体识别**：从问句中提取人名、关系词。
-                2. **模糊匹配**：若精确匹配失败，尝试相似度匹配。
-                3. **图谱遍历**：根据关系（指导、同事、院系）进行单跳或多跳查询。
-                4. **结果生成**：组装自然语言答案。
-                """)
-                # 显示推理中涉及到的实体
-                if answer != help_message():
-                    st.markdown("**涉及实体：**")
-                    for name in get_all_names():
-                        if name in answer:
-                            st.write(f"- {name}（{PERSONS[name]['type']}）")
+            # 推理过程（简单展示）
+            with st.expander("📐 推理路径"):
+                st.markdown("**涉及实体：**")
+                entities = extract_entities_from_question(question)
+                if entities:
+                    for e in entities:
+                        st.write(f"- {e}（{PERSONS[e]['type']}）")
+                else:
+                    st.write("未识别到具体人物，显示全图")
+            # 将问题暂存，用于右侧绘图
+            st.session_state["last_question"] = question
         else:
             st.warning("请输入问题")
 
+# 右侧动态图谱（根据最近一次推理的问题）
 with col_right:
-    st.subheader("🗺️ 知识图谱可视化")
-    fig = draw_graph()
-    st.pyplot(fig)
-    st.caption("绿色箭头：指导关系 | 橙色虚线：同事关系")
+    st.subheader("🗺️ 动态知识图谱")
+    last_q = st.session_state.get("last_question", "")
+    if last_q:
+        fig = draw_subgraph(last_q, G_full)
+        st.pyplot(fig)
+    else:
+        # 默认显示全图（或欢迎图）
+        fig = draw_subgraph("", G_full)  # 空字符串会显示全图
+        st.pyplot(fig)
+    st.caption("绿色箭头：指导关系 | 橙色虚线：同事关系 | 黄色节点：问题中涉及的人物")
 
-# 页脚
 st.divider()
-st.caption("🏫 校内人员图谱 | 支持模糊匹配、多跳推理 | 数据可编辑（临时）")
+st.caption("🏫 校内人员图谱 | 动态子图 | 支持模糊匹配、多跳推理")
